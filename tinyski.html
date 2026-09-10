@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Tiny Ski</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#d0e8f2; display:flex; justify-content:center; align-items:center; font-family:'Segoe UI',sans-serif; overflow:hidden; height:100vh; }
+  #game-wrap { position:relative; border:3px solid #3b5a68; border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,.25); }
+  canvas { display:block; background:#f0f8ff; image-rendering: pixelated; }
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(0,0,0,.55); z-index:1; font-size:28px; color:#fff; text-shadow:0 2px 4px rgba(0,0,0,.4); }
+  #overlay h2 { margin-bottom:12px; font-size:42px; letter-spacing:2px; }
+  #overlay p { font-size:16px; line-height:1.6; max-width:340px; text-align:center; color:#e0e8f0; }
+  #overlay .btn-row { margin-top:24px; display:flex; gap:12px; }
+  #overlay button { padding:10px 26px; font-size:16px; border:none; border-radius:8px; cursor:pointer; background:#3b5a68; color:#fff; transition:background .2s; }
+  #overlay button:hover { background:#5a8a9e; }
+  #hud { position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.65); color:#fff; padding:8px 14px; border-radius:6px; font-size:14px; z-index:2; line-height:1.6; pointer-events:none; }
+  #yeti-warning { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(180,20,20,0.85); color:#fff; padding:12px 28px; border-radius:8px; font-size:22px; font-weight:bold; z-index:3; pointer-events:none; opacity:0; transition:opacity .3s; text-shadow:0 1px 3px rgba(0,0,0,.5); }
+</style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="game" width="800" height="560"></canvas>
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Distance: <span id="distance">0</span>m</div>
+    <div>Speed: <span id="speed">2.0</span></div>
+  </div>
+  <div id="yeti-warning">⚠️ YETI APPROACHING! ⚠️</div>
+  <div id="overlay">
+    <h2>⛷️ Tiny Ski</h2>
+    <p>W / S &mdash; slow down / speed up<br/>
+       A / D &mdash; steer left / right<br/>
+       Avoid trees, rocks &amp; snowmen!<br/>
+       Survive 2048m &mdash; the Yeti comes!</p>
+    <div class="btn-row"><button id="start-btn">Start Skiing</button></div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  CONSTANTS
+// ═══════════════════════════════════════════════════════════
+const CANVAS_W = 800, CANVAS_H = 560;
+const TILE = 16;
+const PPM = 60; // pixels per meter — scale for distance calculation
+const PLAYER_Y = Math.floor(CANVAS_H / 2);
+const YETI_THRESHOLD = 2048;          // meters before yeti appears
+const YETI_SPEED_BASE = 2.4;
+const YETI_SPEED_MAX  = 3.2;
+
+// ── Player speed constants ──
+const PLAYER_BASE_SPEED = 2.0;
+const PLAYER_MIN_SPEED  = 1.25;
+const PLAYER_MAX_SPEED  = 3.5;
+const PLAYER_STEER_SPEED = 1.0;
+const PLAYER_SPEED_RAMP = 0.02;  // speed change per frame
+const OBSTACLE_RADIUS = (TILE + 2) / 2;  // collision radius for obstacles (matches 18x18 draw size)
+const PLAYER_RADIUS   = TILE * 0.45;
+const YETI_RADIUS     = (TILE + 2) / 2;  // yeti collision radius (matches obstacle draw size)
+
+// ═══════════════════════════════════════════════════════════
+//  TILE PATHS
+// ═══════════════════════════════════════════════════════════
+const TILE_PATHS = {
+  // Terrain (6 tiles matching actual files)
+  snowA:  'assets/Tiles/terrain_textures/tile_0000.png',
+  snowB:  'assets/Tiles/terrain_textures/tile_0005.png',
+  iceA:   'assets/Tiles/terrain_textures/tile_0013.png',
+  snowC:  'assets/Tiles/terrain_textures/tile_0016.png',
+  snowD:  'assets/Tiles/terrain_textures/tile_0049.png',
+  iceB:   'assets/Tiles/terrain_textures/tile_0052.png',
+  // Player
+  playerA: 'assets/Tiles/player_sprite/female/tile_0082.png',
+  playerB: 'assets/Tiles/player_sprite/female/tile_0083.png',
+  // Yeti
+  yetiA:   'assets/Tiles/yeti_sprite/tile_0078.png',
+  yetiB:   'assets/Tiles/yeti_sprite/tile_0079.png',
+  yetiC:   'assets/Tiles/yeti_sprite/tile_0080.png',
+  // Collision objects
+  stumpA:  'assets/Tiles/collision_objects/tile_0006.png',
+  bushA:   'assets/Tiles/collision_objects/tile_0019.png',
+  bushB:   'assets/Tiles/collision_objects/tile_0031.png',
+  bushC:   'assets/Tiles/collision_objects/tile_0030.png',
+  snowman: 'assets/Tiles/collision_objects/tile_0069.png',
+  rock:    'assets/Tiles/collision_objects/tile_0081.png',
+};
+
+// ═══════════════════════════════════════════════════════════
+//  CANVAS & DOM
+// ═══════════════════════════════════════════════════════════
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+const overlay   = document.getElementById('overlay');
+const hudScore  = document.getElementById('score');
+const hudDist   = document.getElementById('distance');
+const hudSpeed  = document.getElementById('speed');
+const yetiWarn  = document.getElementById('yeti-warning');
+
+// ═══════════════════════════════════════════════════════════
+//  TILE LOADING
+// ═══════════════════════════════════════════════════════════
+const tiles = {};
+let tilesLoaded = 0;
+const totalTiles = Object.keys(TILE_PATHS).length;
+
+for (const [key, path] of Object.entries(TILE_PATHS)) {
+  const img = new Image();
+  img.src = path;
+  img.onload = () => { tiles[key] = img; tilesLoaded++; };
+  img.onerror = () => { tilesLoaded++; };
+}
+
+function allTilesReady() { return tilesLoaded >= totalTiles; }
+
+// ═══════════════════════════════════════════════════════════
+//  GAME STATE
+// ═══════════════════════════════════════════════════════════
+let running = false;
+let gameOver = false;
+let gameJustOver = false;  // flag to render game-over overlay exactly once
+
+// Player
+let playerX = CANVAS_W / 2;
+let baseSpeed = PLAYER_BASE_SPEED;
+let currentSpeed = PLAYER_BASE_SPEED;
+let steerDir = 0;          // -1 = left, 0 = none, 1 = right
+let steerSpeed = PLAYER_STEER_SPEED;      // horizontal movement speed
+let playerFrame = 0;       // 0 or 1 for animation
+let playerFrameTimer = 0;
+let wHeld = false;
+let sHeld = false;
+
+// Terrain
+const GRID_COLS = Math.ceil(CANVAS_W / TILE) + 6;
+const GRID_ROWS = Math.ceil(CANVAS_H / TILE) + 6;
+let terrainGrid = [];       // 2D array of tile keys
+let terrainScrollY = 0;     // fractional scroll offset
+let terrainScrollX = 0;     // fractional lateral scroll offset
+
+// Obstacles
+let obstacles = [];
+
+// Yeti
+let yetiActive = false;
+let yetiX = 0, yetiY = 0;
+let yetiDX = 0, yetiDY = 0;
+let yetiFrame = 0;
+let yetiFrameTimer = 0;
+let yetiSpawned = false;
+
+// Score
+let score = 0;
+let distance = 0;
+let snowballsCollected = 0;
+
+// Particles (snow spray)
+let particles = [];
+
+// Warning timer
+let warningTimer = 0;
+
+// ═══════════════════════════════════════════════════════════
+//  TERRAIN
+// ═══════════════════════════════════════════════════════════
+const TERRAIN_TILES = ['snowA','snowB','iceA','snowC','snowD','iceB'];
+
+function randomTerrainTile() {
+  const r = Math.random();
+  if (r < 0.25) return 'snowA';
+  if (r < 0.45) return 'snowB';
+  if (r < 0.55) return 'iceA';
+  if (r < 0.70) return 'snowC';
+  if (r < 0.82) return 'snowD';
+  if (r < 0.92) return 'iceB';
+  return 'snowE';
+}
+
+function initTerrain() {
+  terrainGrid = [];
+  for (let y = 0; y < GRID_ROWS; y++) {
+    terrainGrid[y] = [];
+    for (let x = 0; x < GRID_COLS; x++) {
+      terrainGrid[y][x] = randomTerrainTile();
+    }
+  }
+  terrainScrollY = 0;
+  terrainScrollX = 0;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  OBSTACLE TYPES
+// ═══════════════════════════════════════════════════════════
+const OBSTACLE_TYPES = [
+  { key: 'stumpA',  weight: 30 },
+  { key: 'bushA',   weight: 15 },
+  { key: 'bushB',   weight: 10 },
+  { key: 'bushC',   weight: 10 },
+  { key: 'snowman', weight: 10 },
+  { key: 'rock',    weight: 25 },
+];
+
+function pickObstacleType() {
+  const total = OBSTACLE_TYPES.reduce((s, t) => s + t.weight, 0);
+  let r = Math.random() * total;
+  for (const t of OBSTACLE_TYPES) {
+    r -= t.weight;
+    if (r <= 0) return t.key;
+  }
+  return 'tree';
+}
+
+function spawnObstacle() {
+  const type = pickObstacleType();
+  const x = TILE + Math.random() * (CANVAS_W - TILE * 2);
+  obstacles.push({
+    x,
+    y: CANVAS_H + TILE * 2,
+    type,
+    w: TILE,
+    h: TILE,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+//  SKI TRAIL
+// ═══════════════════════════════════════════════════════════
+const skiTrail = new Map(); // "gx,gy" -> opacity (0-1)
+
+function updateSkiTrail() {
+  // Fade trail over time
+  for (const [key, val] of skiTrail) {
+    skiTrail.set(key, val - 0.005);
+    if (val - 0.005 <= 0) skiTrail.delete(key);
+  }
+  // Clean up trail entries that are off-screen to prevent unbounded growth
+  const margin = 5;
+  for (const [key, val] of skiTrail) {
+    if (val <= 0) continue;
+    const [gx, gy] = key.split(',').map(Number);
+    const sx = gx * TILE + terrainScrollX;
+    // Trail world Y is stored as distance-based tile row; screen Y = PLAYER_Y - (totalScroll - trailWorldY)
+    const sy = PLAYER_Y - (distance * PPM - gy * TILE);
+    if (sx < -TILE * margin || sx > CANVAS_W + TILE * margin ||
+        sy < -TILE * margin || sy > CANVAS_H + TILE * margin) {
+      skiTrail.delete(key);
+    }
+  }
+}
+
+function drawSkiTrail() {
+  for (const [key, alpha] of skiTrail) {
+    if (alpha <= 0) continue;
+    const [gx, gy] = key.split(',').map(Number);
+    // Convert world-space trail coords to screen-space.
+    // gy is stored as a tile-row at creation time (world-space Y = gy * TILE).
+    // Screen Y = PLAYER_Y minus how far the player has traveled since creation.
+    const sx = gx * TILE + terrainScrollX;
+    const sy = PLAYER_Y - (distance * PPM - gy * TILE);
+    // Only draw if on screen
+    if (sx > -TILE && sx < CANVAS_W && sy > -TILE && sy < CANVAS_H) {
+      ctx.fillStyle = `rgba(160,195,230,${alpha * 0.5})`;
+      ctx.fillRect(sx + 1, sy + 1, TILE - 2, TILE - 2);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  PARTICLES
+// ═══════════════════════════════════════════════════════════
+function spawnParticles(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 3,
+      vy: (Math.random() - 0.5) * 3 - 1,
+      alpha: 1,
+      size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  INIT / RESET
+// ═══════════════════════════════════════════════════════════
+function initGame() {
+  playerX = CANVAS_W / 2;
+  baseSpeed = PLAYER_BASE_SPEED;
+  currentSpeed = PLAYER_BASE_SPEED;
+  steerDir = 0;
+  wHeld = false;
+  sHeld = false;
+  score = 0;
+  distance = 0;
+  snowballsCollected = 0;
+  obstacles = [];
+  particles = [];
+  terrainScrollY = 0;
+  terrainScrollX = 0;
+  yetiActive = false;
+  yetiSpawned = false;
+  gameOver = false;
+  gameJustOver = false;
+  warningTimer = 0;
+  playerFrame = 0;
+  yetiFrame = 0;
+  skiTrail.clear();
+  initTerrain();
+
+  // Pre-place some obstacles so the screen isn't empty (increased 50%)
+  for (let i = 0; i < 23; i++) {
+    const type = pickObstacleType();
+    obstacles.push({
+      x: TILE + Math.random() * (CANVAS_W - TILE * 2),
+      y: Math.random() * CANVAS_H,
+      type,
+      w: TILE,
+      h: TILE,
+    });
+  }
+
+  overlay.style.display = 'none';
+  yetiWarn.style.opacity = '0';
+}
+
+// ═══════════════════════════════════════════════════════════
+//  COLLISION
+// ═══════════════════════════════════════════════════════════
+function circleCollision(ax, ay, ar, bx, by, br) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return (dx * dx + dy * dy) < (ar + br) * (ar + br);
+}
+
+function checkPlayerCollision() {
+  // Player is always at screen center (tile center = playerScreenX - TILE/2 + TILE/2 = playerScreenX)
+  const playerScreenX = CANVAS_W / 2;
+  const margin = TILE * 2; // extra margin for collision check
+  for (const o of obstacles) {
+    // Skip obstacles far off-screen
+    if (o.y < -TILE * 3 || o.y > CANVAS_H + TILE * 3) continue;
+    // Obstacle tile center = renderTopLeft + TILE/2 = (o.x + terrainScrollX - TILE/2) + TILE/2 = o.x + terrainScrollX
+    const obsCenterX = o.x + terrainScrollX;
+    const obsCenterY = o.y;
+    if (circleCollision(playerScreenX, PLAYER_Y, PLAYER_RADIUS, obsCenterX, obsCenterY, OBSTACLE_RADIUS)) {
+      return 'obstacle';
+    }
+  }
+  if (yetiActive) {
+    // Yeti tile center = yetiX + terrainScrollX
+    const yetiCenterX = yetiX + terrainScrollX;
+    const yetiCenterY = yetiY;
+    if (circleCollision(playerScreenX, PLAYER_Y, PLAYER_RADIUS, yetiCenterX, yetiCenterY, YETI_RADIUS)) {
+      return 'yeti';
+    }
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  UPDATE
+// ═══════════════════════════════════════════════════════════
+function update() {
+  if (gameOver || !running) return;
+
+  // ── Speed returns to base when neither W, S, nor steering held ──
+  if (!wHeld && !sHeld && steerDir === 0) {
+    if (currentSpeed > baseSpeed) currentSpeed -= PLAYER_SPEED_RAMP * 2.5;
+    if (currentSpeed < baseSpeed) currentSpeed += PLAYER_SPEED_RAMP * 2.5;
+    if (Math.abs(currentSpeed - baseSpeed) < 0.05) currentSpeed = baseSpeed;
+  }
+
+  // ── Gradual speed decrease while W held (slow down) ──
+  if (wHeld && currentSpeed > PLAYER_MIN_SPEED) {
+    currentSpeed -= PLAYER_SPEED_RAMP;
+  }
+
+  // ── Gradual speed increase while S held (speed up) ──
+  if (sHeld && currentSpeed < PLAYER_MAX_SPEED) {
+    currentSpeed += PLAYER_SPEED_RAMP;
+  }
+
+  // ── Set speed to steer speed while steering (A or D held) ──
+  if (steerDir !== 0) {
+    currentSpeed = PLAYER_STEER_SPEED;
+  }
+
+  // ── Distance & score ──
+  // currentSpeed is in px/frame; divide by PPM to get meters/frame
+  distance += currentSpeed / PPM;
+  score = Math.floor(distance) + snowballsCollected * 10;
+
+  // ── Yeti activation ──
+  if (!yetiActive && distance >= YETI_THRESHOLD) {
+    yetiActive = true;
+    yetiSpawned = true;
+    // Spawn yeti above the screen
+    yetiX = TILE + Math.random() * (CANVAS_W - TILE * 2);
+    yetiY = -TILE * 4;
+    yetiDX = 0;
+    yetiDY = YETI_SPEED_BASE;
+    warningTimer = 180; // 3 seconds of warning
+  }
+
+  // Warning display
+  if (warningTimer > 0) {
+    warningTimer--;
+    yetiWarn.style.opacity = (Math.floor(warningTimer / 15) % 2 === 0) ? '1' : '0.3';
+    if (warningTimer === 0) yetiWarn.style.opacity = '0';
+  }
+
+  // ── Player animation ──
+  playerFrameTimer++;
+  if (playerFrameTimer > 8) {
+    playerFrame = 1 - playerFrame;
+    playerFrameTimer = 0;
+  }
+
+  // ── Yeti animation ──
+  if (yetiActive) {
+    yetiFrameTimer++;
+    if (yetiFrameTimer > 10) {
+      yetiFrame = (yetiFrame + 1) % 3;
+      yetiFrameTimer = 0;
+    }
+  }
+
+  // ── Terrain scroll (Y) ──
+  terrainScrollY += currentSpeed;
+  const rowsToScroll = Math.floor(terrainScrollY / TILE);
+  if (rowsToScroll >= 1) {
+    for (let i = 0; i < rowsToScroll; i++) {
+      terrainGrid.shift();
+      const newRow = [];
+      for (let x = 0; x < GRID_COLS; x++) {
+        newRow.push(randomTerrainTile());
+      }
+      terrainGrid.push(newRow);
+    }
+    terrainScrollY -= rowsToScroll * TILE;
+  }
+
+  // ── Move obstacles up (toward player) ──
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].y -= currentSpeed;
+    if (obstacles[i].y < -TILE * 4) {
+      obstacles.splice(i, 1);
+    }
+  }
+
+  // ── Spawn new obstacles at bottom (increased 50%) ──
+  const spawnRate = (0.015 + distance * 0.000005) * 1.5; // gets harder over time
+  if (Math.random() < spawnRate) {
+    spawnObstacle();
+  }
+
+  // ── Player horizontal movement (relative to terrain) ──
+  playerX += steerDir * steerSpeed;
+  // Clamp player to screen bounds so terrain doesn't scroll past edges
+  // Player can move within one tile of each screen edge
+  const terrainMinX = TILE;
+  const terrainMaxX = CANVAS_W - TILE;
+  if (playerX < terrainMinX) playerX = terrainMinX;
+  if (playerX > terrainMaxX) playerX = terrainMaxX;
+
+  // ── Lateral scroll derived from player terrain position ──
+  // Player stays centered on screen; terrainScrollX = -playerX + center offset
+  terrainScrollX = -playerX + CANVAS_W / 2;
+
+  // ── Record ski trail at player world-space position ──
+  // Store trail at a world-space Y that increases as the player travels,
+  // so each trail entry is at a unique world-space position and moves up
+  // with the terrain, leaving a visible trail behind the player.
+  {
+    const trailGX = Math.floor(playerX / TILE);
+    const trailGY = Math.floor(distance * PPM / TILE);
+    const trailKey = `${trailGX},${trailGY}`;
+    if (!skiTrail.has(trailKey)) {
+      skiTrail.set(trailKey, 1.0); // opacity
+    }
+  }
+
+  // ── Yeti chase logic ──
+  if (yetiActive) {
+    const dx = playerX - yetiX;
+    const dy = PLAYER_Y - yetiY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist > 0) {
+      // Accelerate as yeti gets closer
+      const chaseFactor = Math.min(YETI_SPEED_MAX / YETI_SPEED_BASE, dist / 150);
+      const targetDX = (dx / dist) * YETI_SPEED_BASE * chaseFactor;
+      const targetDY = (dy / dist) * YETI_SPEED_BASE * chaseFactor;
+
+      // Smooth acceleration
+      yetiDX += (targetDX - yetiDX) * 0.05;
+      yetiDY += (targetDY - yetiDY) * 0.05;
+    }
+
+    // Obstacle avoidance for yeti
+    let avoidDX = 0, avoidDY = 0;
+    for (const o of obstacles) {
+      const adx = yetiX - o.x;
+      const ady = yetiY - o.y;
+      const adist = Math.sqrt(adx * adx + ady * ady);
+      if (adist < TILE * 2 && adist > 0) {
+        const force = (TILE * 2 - adist) / (TILE * 2);
+        avoidDX += (adx / adist) * force * 2;
+        avoidDY += (ady / adist) * force * 2;
+      }
+    }
+
+    yetiX += yetiDX + avoidDX * 0.5;
+    yetiY += yetiDY + avoidDY * 0.5;
+
+    // Keep yeti in bounds
+    if (yetiX < TILE) yetiX = TILE;
+    if (yetiX > CANVAS_W - TILE) yetiX = CANVAS_W - TILE;
+
+    // If yeti goes off the top, respawn it
+    if (yetiY < -TILE * 6) {
+      yetiY = -TILE * 4;
+      yetiX = TILE + Math.random() * (CANVAS_W - TILE * 2);
+    }
+  }
+
+  // ── Collision check ──
+  const hit = checkPlayerCollision();
+  if (hit === 'obstacle' || hit === 'yeti') {
+    gameOver = true;
+    gameJustOver = true;
+    running = false;  // stop the current game loop so it won't restart on its own
+    spawnParticles(playerX, PLAYER_Y, 20);
+  }
+
+  // ── Update ski trail ──
+  updateSkiTrail();
+
+  // ── Particles ──
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.alpha -= 0.03;
+    if (p.alpha <= 0) particles.splice(i, 1);
+  }
+
+  // ── Snow spray behind player ──
+  if (Math.random() < 0.3) {
+    const playerScreenX = playerX + terrainScrollX;
+    spawnParticles(
+      playerScreenX + (Math.random() - 0.5) * 6,
+      PLAYER_Y + 4,
+      1
+    );
+  }
+
+  // ── Update HUD ──
+  hudScore.textContent = score;
+  hudDist.textContent = Math.floor(distance);
+  // Show speed in km/h for the player
+  hudSpeed.textContent = (currentSpeed * 60 / PPM * 3.6).toFixed(1);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════════════════════════
+function drawTile(key, sx, sy) {
+  const img = tiles[key];
+  if (img && img.width > 0) {
+    ctx.drawImage(img, 0, 0, TILE, TILE, sx, sy, TILE, TILE);
+  }
+}
+
+function render() {
+  // ── Clear ──
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // ── Draw terrain ──
+  const offsetX = terrainScrollX;
+  const offsetY = terrainScrollY;
+
+  const startCol = Math.floor(-offsetX / TILE) - 1;
+  const startRow = Math.floor(-offsetY / TILE) - 1;
+  const endCol   = startCol + Math.ceil(CANVAS_W / TILE) + 3;
+  const endRow   = startRow + Math.ceil(CANVAS_H / TILE) + 3;
+
+  for (let row = startRow; row < endRow; row++) {
+    for (let col = startCol; col < endCol; col++) {
+      const gx = col + GRID_COLS; // wrap positive
+      const gy = row + GRID_ROWS;
+      const tileKey = terrainGrid[(gy % GRID_ROWS)][(gx % GRID_COLS)];
+      const sx = col * TILE + offsetX;
+      const sy = row * TILE + offsetY;
+      drawTile(tileKey, sx, sy);
+    }
+  }
+
+  // ── Draw ski trail ──
+  drawSkiTrail();
+
+  // ── Draw obstacles (shifted by terrainScrollX for lateral movement) ──
+  // Draw collision objects at 18x18 to avoid top-edge clipping on tree/stump sprites
+  const OBSTACLE_DRAW_SIZE = TILE + 2;
+  for (const o of obstacles) {
+    const img = tiles[o.type];
+    if (img && img.width > 0) {
+      // Draw image centered, scaled to OBSTACLE_DRAW_SIZE to avoid top clipping
+      const sx = o.x + terrainScrollX - OBSTACLE_DRAW_SIZE / 2;
+      const sy = o.y - OBSTACLE_DRAW_SIZE / 2;
+      ctx.drawImage(img, 0, 0, img.width, img.height, sx, sy, OBSTACLE_DRAW_SIZE, OBSTACLE_DRAW_SIZE);
+    }
+  }
+
+  // ── Draw yeti (shifted by terrainScrollX for lateral movement) ──
+  if (yetiActive) {
+    const yetiKeys = ['yetiA', 'yetiB', 'yetiC'];
+    const yetiImg = tiles[yetiKeys[yetiFrame]];
+    if (yetiImg && yetiImg.width > 0) {
+      const sx = yetiX + terrainScrollX - OBSTACLE_DRAW_SIZE / 2;
+      const sy = yetiY - OBSTACLE_DRAW_SIZE / 2;
+      ctx.drawImage(yetiImg, 0, 0, yetiImg.width, yetiImg.height, sx, sy, OBSTACLE_DRAW_SIZE, OBSTACLE_DRAW_SIZE);
+    }
+  }
+
+  // ── Draw particles ──
+  for (const p of particles) {
+    ctx.fillStyle = `rgba(255,255,255,${p.alpha})`;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+
+  // ── Draw player (screen position = playerX + terrainScrollX) ──
+  if (!gameOver) {
+    const playerKeys = ['playerA', 'playerB'];
+    const playerScreenX = playerX + terrainScrollX;
+    const playerImg = tiles[playerKeys[playerFrame]];
+    if (playerImg && playerImg.width > 0) {
+      // Draw player at its native size, centered on screen
+      const sx = playerScreenX - playerImg.width / 2;
+      const sy = PLAYER_Y - playerImg.height / 2;
+      ctx.drawImage(playerImg, 0, 0, playerImg.width, playerImg.height, sx, sy, playerImg.width, playerImg.height);
+    }
+  }
+
+  // ── Game over overlay (render once) ──
+  if (gameOver && gameJustOver) {
+    gameJustOver = false;
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+      <h2>💥 Game Over!</h2>
+      <p>You made it <strong>${Math.floor(distance)}m</strong>.<br/>
+         Final score: <strong>${score}</strong></p>
+      <div class="btn-row"><button id="restart-btn">Ski Again</button></div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  INPUT
+// ═══════════════════════════════════════════════════════════
+const keysDown = {};
+
+window.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (keysDown[key]) return; // ignore repeat
+  keysDown[key] = true;
+
+  if (!running || gameOver) return;
+
+  switch (key) {
+    case 'w': wHeld = true; break;
+    case 's': sHeld = true; break;
+    case 'a': steerDir = -1; break;
+    case 'd': steerDir =  1; break;
+  }
+  e.preventDefault();
+});
+
+window.addEventListener('keyup', (e) => {
+  const key = e.key.toLowerCase();
+  keysDown[key] = false;
+
+  if (!running || gameOver) return;
+
+  switch (key) {
+    case 'w': wHeld = false; break;
+    case 's': sHeld = false; break;
+    case 'a': if (steerDir === -1) steerDir = 0; break;
+    case 'd': if (steerDir ===  1) steerDir = 0; break;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+//  GAME LOOP
+// ═══════════════════════════════════════════════════════════
+function gameLoop() {
+  update();
+  render();
+  if (running) requestAnimationFrame(gameLoop);
+}
+
+function startGame() {
+  // Cancel any lingering animation frame from a previous game session
+  running = false;
+  initGame();
+  running = true;
+  requestAnimationFrame(gameLoop);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  UI
+// ═══════════════════════════════════════════════════════════
+document.getElementById('start-btn').addEventListener('click', startGame);
+
+// Use event delegation on overlay so the restart button works after innerHTML replacement
+overlay.addEventListener('click', (e) => {
+  if (e.target.id === 'restart-btn' && gameOver) startGame();
+});
+
+// ═══════════════════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════════════════
+window.addEventListener('load', () => {
+  function waitForTiles() {
+    if (allTilesReady()) {
+      initTerrain();
+      // Draw initial frame
+      render();
+    } else {
+      setTimeout(waitForTiles, 50);
+    }
+  }
+  waitForTiles();
+});
+</script>
+</body>
+</html>
