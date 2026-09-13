@@ -20,7 +20,7 @@
 </head>
 <body>
 <div id="game-wrap">
-  <canvas id="game" width="800" height="560"></canvas>
+  <canvas id="game" width="480" height="720"></canvas>
   <div id="hud">
     <div>Score: <span id="score">0</span></div>
     <div>Distance: <span id="distance">0</span>m</div>
@@ -41,7 +41,7 @@
 // ═══════════════════════════════════════════════════════════
 //  CONSTANTS
 // ═══════════════════════════════════════════════════════════
-const CANVAS_W = 800, CANVAS_H = 560;
+const CANVAS_W = 480, CANVAS_H = 720;
 const TILE = 16;
 const PPM = 60; // pixels per meter — scale for distance calculation
 const PLAYER_Y = Math.floor(CANVAS_H / 2);
@@ -84,6 +84,9 @@ const TILE_PATHS = {
   bushC:   'assets/Tiles/collision_objects/tile_0030.png',
   snowman: 'assets/Tiles/collision_objects/tile_0069.png',
   rock:    'assets/Tiles/collision_objects/tile_0081.png',
+  // Boundary markers (not used as random obstacles)
+  boundaryRight: 'assets/Tiles/collision_objects/tile_0032.png',
+  boundaryLeft:  'assets/Tiles/collision_objects/tile_0033.png',
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -133,7 +136,10 @@ let sHeld = false;
 
 // Terrain
 const GRID_COLS = Math.ceil(CANVAS_W / TILE) + 6;
+const TERRAIN_WIDTH_SCALE = 1.5; // 50% wider navigable terrain (kept for reference)
 const GRID_ROWS = Math.ceil(CANVAS_H / TILE) + 6;
+const TERRAIN_MIN_X = -TILE * 6;   // left navigable boundary (terrain space)
+const TERRAIN_MAX_X = CANVAS_W + TILE * 6; // right navigable boundary (terrain space)
 let terrainGrid = [];       // 2D array of tile keys
 let terrainScrollY = 0;     // fractional scroll offset
 let terrainScrollX = 0;     // fractional lateral scroll offset
@@ -160,6 +166,10 @@ let particles = [];
 // Warning timer
 let warningTimer = 0;
 
+// Boundary markers (scroll with terrain, placed at screen edges)
+let boundaryMarkers = [];
+let lastBoundaryInterval = 0; // track last 20m interval to avoid duplicates
+
 // ═══════════════════════════════════════════════════════════
 //  TERRAIN
 // ═══════════════════════════════════════════════════════════
@@ -172,8 +182,7 @@ function randomTerrainTile() {
   if (r < 0.55) return 'iceA';
   if (r < 0.70) return 'snowC';
   if (r < 0.82) return 'snowD';
-  if (r < 0.92) return 'iceB';
-  return 'snowE';
+  return 'iceB';
 }
 
 function initTerrain() {
@@ -207,12 +216,18 @@ function pickObstacleType() {
     r -= t.weight;
     if (r <= 0) return t.key;
   }
-  return 'tree';
+  // Fallback: should never reach here since weights sum to 100 and Math.random() < 1
+  return OBSTACLE_TYPES[OBSTACLE_TYPES.length - 1].key;
 }
 
 function spawnObstacle() {
   const type = pickObstacleType();
-  const x = TILE + Math.random() * (CANVAS_W - TILE * 2);
+  // Spawn across the full navigable terrain bounds (TERRAIN_MIN_X to TERRAIN_MAX_X)
+  // so obstacles can appear at the left/right edges where the player can reach.
+  const halfDraw = (TILE + 2) / 2;
+  const minX = TERRAIN_MIN_X + halfDraw;
+  const maxX = TERRAIN_MAX_X - halfDraw;
+  const x = minX + Math.random() * (maxX - minX);
   obstacles.push({
     x,
     y: CANVAS_H + TILE * 2,
@@ -305,13 +320,19 @@ function initGame() {
   playerFrame = 0;
   yetiFrame = 0;
   skiTrail.clear();
+  boundaryMarkers = [];
+  lastBoundaryInterval = 0;
   initTerrain();
 
   // Pre-place some obstacles so the screen isn't empty (increased 50%)
+  // Use full navigable terrain bounds so pre-placed obstacles also cover edges.
+  const halfDraw = (TILE + 2) / 2;
+  const preMinX = TERRAIN_MIN_X + halfDraw;
+  const preMaxX = TERRAIN_MAX_X - halfDraw;
   for (let i = 0; i < 23; i++) {
     const type = pickObstacleType();
     obstacles.push({
-      x: TILE + Math.random() * (CANVAS_W - TILE * 2),
+      x: preMinX + Math.random() * (preMaxX - preMinX),
       y: Math.random() * CANVAS_H,
       type,
       w: TILE,
@@ -354,6 +375,7 @@ function checkPlayerCollision() {
       return 'yeti';
     }
   }
+
   return null;
 }
 
@@ -380,10 +402,9 @@ function update() {
     currentSpeed += PLAYER_SPEED_RAMP;
   }
 
-  // ── Set speed to steer speed while steering (A or D held) ──
-  if (steerDir !== 0) {
-    currentSpeed = PLAYER_STEER_SPEED;
-  }
+  // ── Lateral movement while steering (A or D held) ──
+  // Forward speed is independent of steering direction
+  // (steerSpeed is applied below to playerX, not to currentSpeed)
 
   // ── Distance & score ──
   // currentSpeed is in px/frame; divide by PPM to get meters/frame
@@ -448,20 +469,49 @@ function update() {
     }
   }
 
+  // ── Update boundary marker screen positions and remove off-screen ones ──
+  for (let i = boundaryMarkers.length - 1; i >= 0; i--) {
+    // Recalculate screen Y each frame so markers scroll up with the terrain
+    boundaryMarkers[i].screenY = PLAYER_Y + (boundaryMarkers[i].worldY - distance * PPM);
+    // Remove marker when it scrolls off the top of the screen
+    if (boundaryMarkers[i].screenY < -TILE * 4) {
+      boundaryMarkers.splice(i, 1);
+    }
+  }
+
   // ── Spawn new obstacles at bottom (increased 50%) ──
   const spawnRate = (0.015 + distance * 0.000005) * 1.5; // gets harder over time
   if (Math.random() < spawnRate) {
     spawnObstacle();
   }
 
+  // ── Spawn boundary markers every 20m starting at 20m ──
+  const currentInterval = Math.floor(distance / 20);
+  if (currentInterval > lastBoundaryInterval) {
+    // Spawn markers for each new interval at the bottom of the screen
+    for (let interval = lastBoundaryInterval + 1; interval <= currentInterval; interval++) {
+      // Place marker at the bottom of the screen so it scrolls up with the terrain
+      const markerScreenY = CANVAS_H;
+      boundaryMarkers.push({
+        worldY: distance * PPM + CANVAS_H,
+        screenY: markerScreenY,
+        type: 'boundaryRight', // right edge marker
+      });
+      boundaryMarkers.push({
+        worldY: distance * PPM + CANVAS_H,
+        screenY: markerScreenY,
+        type: 'boundaryLeft', // left edge marker
+      });
+    }
+    lastBoundaryInterval = currentInterval;
+  }
+
   // ── Player horizontal movement (relative to terrain) ──
   playerX += steerDir * steerSpeed;
-  // Clamp player to screen bounds so terrain doesn't scroll past edges
-  // Player can move within one tile of each screen edge
-  const terrainMinX = TILE;
-  const terrainMaxX = CANVAS_W - TILE;
-  if (playerX < terrainMinX) playerX = terrainMinX;
-  if (playerX > terrainMaxX) playerX = terrainMaxX;
+  // Clamp player to expanded bounds (50% wider navigable terrain)
+  // Player can move beyond screen edges for wider lateral range
+  if (playerX < TERRAIN_MIN_X) playerX = TERRAIN_MIN_X;
+  if (playerX > TERRAIN_MAX_X) playerX = TERRAIN_MAX_X;
 
   // ── Lateral scroll derived from player terrain position ──
   // Player stays centered on screen; terrainScrollX = -playerX + center offset
@@ -526,7 +576,7 @@ function update() {
 
   // ── Collision check ──
   const hit = checkPlayerCollision();
-  if (hit === 'obstacle' || hit === 'yeti') {
+  if (hit === 'obstacle' || hit === 'yeti' || hit === 'boundary') {
     gameOver = true;
     gameJustOver = true;
     running = false;  // stop the current game loop so it won't restart on its own
@@ -545,8 +595,8 @@ function update() {
     if (p.alpha <= 0) particles.splice(i, 1);
   }
 
-  // ── Snow spray behind player ──
-  if (Math.random() < 0.3) {
+  // ── Snow spray behind player (reduced density) ──
+  if (Math.random() < 0.1) {
     const playerScreenX = playerX + terrainScrollX;
     spawnParticles(
       playerScreenX + (Math.random() - 0.5) * 6,
@@ -609,6 +659,24 @@ function render() {
       const sx = o.x + terrainScrollX - OBSTACLE_DRAW_SIZE / 2;
       const sy = o.y - OBSTACLE_DRAW_SIZE / 2;
       ctx.drawImage(img, 0, 0, img.width, img.height, sx, sy, OBSTACLE_DRAW_SIZE, OBSTACLE_DRAW_SIZE);
+    }
+  }
+
+  // ── Draw boundary markers at terrain edges ──
+  for (const m of boundaryMarkers) {
+    const img = tiles[m.type];
+    if (img && img.width > 0) {
+      // Use pre-calculated screen Y (updated each frame in update())
+      const sy = m.screenY;
+      if (m.type === 'boundaryRight') {
+        // Right edge: place at the screen position of the right terrain boundary
+        const sx = TERRAIN_MAX_X + terrainScrollX;
+        ctx.drawImage(img, 0, 0, img.width, img.height, sx, sy, TILE, TILE);
+      } else if (m.type === 'boundaryLeft') {
+        // Left edge: place at the screen position of the left terrain boundary
+        const sx = TERRAIN_MIN_X + terrainScrollX;
+        ctx.drawImage(img, 0, 0, img.width, img.height, sx, sy, TILE, TILE);
+      }
     }
   }
 
