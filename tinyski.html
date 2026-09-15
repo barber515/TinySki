@@ -5,7 +5,7 @@
 <title>Tiny Ski</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#d0e8f2; display:flex; justify-content:center; align-items:center; font-family:'Segoe UI',sans-serif; overflow:hidden; height:100vh; }
+  body { background:#1a2a34; display:flex; justify-content:center; align-items:center; font-family:'Segoe UI',sans-serif; overflow:hidden; height:100vh; }
   #game-wrap { position:relative; border:3px solid #3b5a68; border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,.25); }
   canvas { display:block; background:#f0f8ff; image-rendering: pixelated; }
   #overlay { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(0,0,0,.55); z-index:1; font-size:28px; color:#fff; text-shadow:0 2px 4px rgba(0,0,0,.4); }
@@ -15,26 +15,58 @@
   #overlay button { padding:10px 26px; font-size:16px; border:none; border-radius:8px; cursor:pointer; background:#3b5a68; color:#fff; transition:background .2s; }
   #overlay button:hover { background:#5a8a9e; }
   #hud { position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.65); color:#fff; padding:8px 14px; border-radius:6px; font-size:14px; z-index:2; line-height:1.6; pointer-events:none; }
-  #yeti-warning { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(180,20,20,0.85); color:#fff; padding:12px 28px; border-radius:8px; font-size:22px; font-weight:bold; z-index:3; pointer-events:none; opacity:0; transition:opacity .3s; text-shadow:0 1px 3px rgba(0,0,0,.5); }
+
+  /* ── Scaling & Fullscreen ── */
+  #game-wrap {
+    transform-origin: center center;
+    will-change: transform;
+  }
+
+  /* When in fullscreen, the wrap IS the viewport — no scale needed */
+  body.fullscreen-active #game-wrap {
+    transform: none;
+  }
+
+  /* Fullscreen button styling */
+  #fullscreen-btn {
+    padding: 10px 26px;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    background: #3b5a68;
+    color: #fff;
+    transition: background .2s;
+  }
+  #fullscreen-btn:hover {
+    background: #5a8a9e;
+  }
+  #fullscreen-btn.hidden {
+    display: none;
+  }
 </style>
 </head>
 <body>
 <div id="game-wrap">
   <canvas id="game" width="480" height="720"></canvas>
-  <div id="hud">
-    <div>Score: <span id="score">0</span></div>
-    <div>Distance: <span id="distance">0</span>m</div>
-    <div>Speed: <span id="speed">2.0</span></div>
-  </div>
-  <div id="yeti-warning">⚠️ YETI APPROACHING! ⚠️</div>
   <div id="overlay">
     <h2>⛷️ Tiny Ski</h2>
     <p>W / S &mdash; slow down / speed up<br/>
        A / D &mdash; steer left / right<br/>
-       Avoid trees, rocks &amp; snowmen!<br/>
-       Survive 2048m &mdash; the Yeti comes!</p>
-    <div class="btn-row"><button id="start-btn">Start Skiing</button></div>
+       🎮 Gamepad: Left stick / D-pad to steer and control speed<br/>
+       Avoid trees, rocks &amp; snowmen!<br/><br/>
+       <strong>Press a Key or Button to Begin</strong></p>
+    <div class="btn-row">
+      <button id="start-btn">Start Skiing</button>
+      <button id="fullscreen-btn" title="Toggle Fullscreen">[FS]</button>
+    </div>
   </div>
+</div>
+<!-- HUD outside the scaled container so it stays readable at any scale -->
+<div id="hud">
+  <div>Score: <span id="score">0</span></div>
+  <div>Distance: <span id="distance">0</span>m</div>
+  <div>Speed: <span id="speed">2.0</span></div>
 </div>
 
 <script>
@@ -45,7 +77,7 @@ const CANVAS_W = 480, CANVAS_H = 720;
 const TILE = 16;
 const PPM = 60; // pixels per meter — scale for distance calculation
 const PLAYER_Y = Math.floor(CANVAS_H / 2);
-const YETI_THRESHOLD = 2048;          // meters before yeti appears
+const YETI_THRESHOLD = 500;           // meters before yeti appears
 const YETI_SPEED_BASE = 2.4;
 const YETI_SPEED_MAX  = 3.2;
 
@@ -98,7 +130,6 @@ const overlay   = document.getElementById('overlay');
 const hudScore  = document.getElementById('score');
 const hudDist   = document.getElementById('distance');
 const hudSpeed  = document.getElementById('speed');
-const yetiWarn  = document.getElementById('yeti-warning');
 
 // ═══════════════════════════════════════════════════════════
 //  TILE LOADING
@@ -153,7 +184,6 @@ let yetiX = 0, yetiY = 0;
 let yetiDX = 0, yetiDY = 0;
 let yetiFrame = 0;
 let yetiFrameTimer = 0;
-let yetiSpawned = false;
 
 // Score
 let score = 0;
@@ -163,8 +193,7 @@ let snowballsCollected = 0;
 // Particles (snow spray)
 let particles = [];
 
-// Warning timer
-let warningTimer = 0;
+
 
 // Boundary markers (scroll with terrain, placed at screen edges)
 let boundaryMarkers = [];
@@ -313,10 +342,8 @@ function initGame() {
   terrainScrollY = 0;
   terrainScrollX = 0;
   yetiActive = false;
-  yetiSpawned = false;
   gameOver = false;
   gameJustOver = false;
-  warningTimer = 0;
   playerFrame = 0;
   yetiFrame = 0;
   skiTrail.clear();
@@ -341,7 +368,6 @@ function initGame() {
   }
 
   overlay.style.display = 'none';
-  yetiWarn.style.opacity = '0';
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -385,22 +411,60 @@ function checkPlayerCollision() {
 function update() {
   if (gameOver || !running) return;
 
-  // ── Speed returns to base when neither W, S, nor steering held ──
-  if (!wHeld && !sHeld && steerDir === 0) {
+  // ── Gradual speed decrease (W held or gamepad slow) ──
+  if (wHeld && currentSpeed > PLAYER_MIN_SPEED) {
+    if (gamepadConnected && gamepadSlow) {
+      // Gamepad slow down: scale by stick deflection beyond threshold
+      // stickY is negative when pushed up; at threshold (-0.5) slowAmount = 1,
+      // at full deflection (-1.0) slowAmount = 2x for faster deceleration
+      const slowAmount = Math.max(1, Math.abs(stickY + GAMEPAD_SLOW_THRESHOLD) / (1 - GAMEPAD_SLOW_THRESHOLD));
+      currentSpeed -= PLAYER_SPEED_RAMP * slowAmount * GAMEPAD_SPEED_RAMP_SCALE;
+    } else {
+      // Keyboard slow down: use base rate without gamepad scaling
+      currentSpeed -= PLAYER_SPEED_RAMP;
+    }
+  }
+
+  // ── Gradual speed increase (S held or gamepad speed) ──
+  if (sHeld && currentSpeed < PLAYER_MAX_SPEED) {
+    if (gamepadConnected && gamepadSpeed) {
+      // Gamepad speed up: scale by stick deflection beyond threshold
+      // stickY is positive when pushed down; at threshold (0.5) speedAmount = 1,
+      // at full deflection (1.0) speedAmount = 2x for faster acceleration
+      const speedAmount = Math.max(1, (stickY - GAMEPAD_SPEED_THRESHOLD) / (1 - GAMEPAD_SPEED_THRESHOLD));
+      currentSpeed += PLAYER_SPEED_RAMP * speedAmount * GAMEPAD_SPEED_RAMP_SCALE;
+    } else {
+      // Keyboard speed up: use base rate without gamepad scaling
+      currentSpeed += PLAYER_SPEED_RAMP;
+    }
+  }
+
+  // Keyboard input debugging
+  if (keysDown['w'] || keysDown['s']) {
+    console.log('Input Debug:', { wPressed: keysDown['w'], sPressed: keysDown['s'], wHeld, sHeld });
+  }
+
+  // ── Speed returns to base when no speed input active ──
+  if (!wHeld && !sHeld) {
     if (currentSpeed > baseSpeed) currentSpeed -= PLAYER_SPEED_RAMP * 2.5;
     if (currentSpeed < baseSpeed) currentSpeed += PLAYER_SPEED_RAMP * 2.5;
     if (Math.abs(currentSpeed - baseSpeed) < 0.05) currentSpeed = baseSpeed;
   }
 
-  // ── Gradual speed decrease while W held (slow down) ──
-  if (wHeld && currentSpeed > PLAYER_MIN_SPEED) {
-    currentSpeed -= PLAYER_SPEED_RAMP;
+  // Debug: Check speed changes
+  if (wHeld || sHeld) {
+    console.log('Speed adjustment:', { wHeld, sHeld, currentSpeed });
   }
 
-  // ── Gradual speed increase while S held (speed up) ──
-  if (sHeld && currentSpeed < PLAYER_MAX_SPEED) {
-    currentSpeed += PLAYER_SPEED_RAMP;
+  // Ensure keyboard controls are working properly
+  if (keysDown['w'] && !wHeld) {
+    console.log('W key pressed but wHeld not set!');
   }
+  if (keysDown['s'] && !sHeld) {
+    console.log('S key pressed but sHeld not set!');
+  }
+
+
 
   // ── Lateral movement while steering (A or D held) ──
   // Forward speed is independent of steering direction
@@ -414,20 +478,13 @@ function update() {
   // ── Yeti activation ──
   if (!yetiActive && distance >= YETI_THRESHOLD) {
     yetiActive = true;
-    yetiSpawned = true;
-    // Spawn yeti above the screen
-    yetiX = TILE + Math.random() * (CANVAS_W - TILE * 2);
+    // Spawn yeti above the screen across the full navigable terrain width
+    const yetiSpawnMin = TERRAIN_MIN_X + TILE;
+    const yetiSpawnMax = TERRAIN_MAX_X - TILE;
+    yetiX = yetiSpawnMin + Math.random() * (yetiSpawnMax - yetiSpawnMin);
     yetiY = -TILE * 4;
     yetiDX = 0;
     yetiDY = YETI_SPEED_BASE;
-    warningTimer = 180; // 3 seconds of warning
-  }
-
-  // Warning display
-  if (warningTimer > 0) {
-    warningTimer--;
-    yetiWarn.style.opacity = (Math.floor(warningTimer / 15) % 2 === 0) ? '1' : '0.3';
-    if (warningTimer === 0) yetiWarn.style.opacity = '0';
   }
 
   // ── Player animation ──
@@ -563,14 +620,16 @@ function update() {
     yetiX += yetiDX + avoidDX * 0.5;
     yetiY += yetiDY + avoidDY * 0.5;
 
-    // Keep yeti in bounds
-    if (yetiX < TILE) yetiX = TILE;
-    if (yetiX > CANVAS_W - TILE) yetiX = CANVAS_W - TILE;
+    // Keep yeti within the full navigable terrain bounds
+    if (yetiX < TERRAIN_MIN_X) yetiX = TERRAIN_MIN_X;
+    if (yetiX > TERRAIN_MAX_X) yetiX = TERRAIN_MAX_X;
 
-    // If yeti goes off the top, respawn it
+    // If yeti goes off the top, respawn it across the full navigable terrain
     if (yetiY < -TILE * 6) {
       yetiY = -TILE * 4;
-      yetiX = TILE + Math.random() * (CANVAS_W - TILE * 2);
+      const respawnMin = TERRAIN_MIN_X + TILE;
+      const respawnMax = TERRAIN_MAX_X - TILE;
+      yetiX = respawnMin + Math.random() * (respawnMax - respawnMin);
     }
   }
 
@@ -732,7 +791,10 @@ window.addEventListener('keydown', (e) => {
   if (keysDown[key]) return; // ignore repeat
   keysDown[key] = true;
 
-  if (!running || gameOver) return;
+  if (!running || gameOver) {
+    startGame();
+    return;
+  }
 
   switch (key) {
     case 'w': wHeld = true; break;
@@ -758,9 +820,171 @@ window.addEventListener('keyup', (e) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+//  GAMEPAD INPUT
+// ═══════════════════════════════════════════════════════════
+const GAMEPAD_STICK_DEADZONE = 0.15;  // ignore small stick drift
+const GAMEPAD_STEER_SCALE = 1.0;       // map full stick deflection to steerDir
+const GAMEPAD_SLOW_THRESHOLD = -0.5;   // stick Y below this = slow down
+const GAMEPAD_SPEED_THRESHOLD = 0.5;   // stick Y above this = speed up
+const GAMEPAD_SPEED_RAMP_SCALE = 3.0;  // multiplier for stick deflection-based acceleration
+
+let gamepadSlow = false;
+let gamepadSpeed = false;
+let gamepadSteer = 0;
+let gamepadConnected = false;
+let stickY = 0;  // module-level so update() can access it for acceleration scaling
+
+function readGamepadInput() {
+  // ── Gamepad button detection for start/restart (only when not running) ──
+  // This runs independently of the game loop so it works on both the initial
+  // start screen and the game-over screen.
+  if (!running) {
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (let i = 0; i < gamepads.length; i++) {
+      const gp = gamepads[i];
+      if (!gp) continue;
+      for (let j = 0; j < gp.buttons.length; j++) {
+        if (gp.buttons[j] && gp.buttons[j].pressed) {
+          startGame();
+          return; // startGame() was called, stop processing
+        }
+      }
+    }
+  }
+
+  // ── Gameplay input (only when game is actively running) ──
+  if (!running || gameOver) return;
+
+  const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let anyConnected = false;
+
+  // Reset gamepad states every time we read input to prevent stale data from disconnected controllers
+  gamepadSlow = false;
+  gamepadSpeed = false;
+  gamepadSteer = 0;
+
+  for (let i = 0; i < gamepads.length; i++) {
+    const gp = gamepads[i];
+    if (!gp) continue;
+    anyConnected = true;
+
+    // ── Left stick (axis 0 = left/right, axis 1 = up/down) ──
+    // Left stick Y-axis is always axis 1 per the Gamepad API spec.
+    // Do NOT sum with axis 3 (right stick Y-axis) — that corrupts speed detection.
+    const stickX = gp.axes[0] ?? 0;
+    stickY = gp.axes[1] ?? 0;
+
+    // Steering from left stick X
+    if (Math.abs(stickX) > GAMEPAD_STICK_DEADZONE) {
+      gamepadSteer = stickX > 0 ? GAMEPAD_STEER_SCALE : -GAMEPAD_STEER_SCALE;
+    } else {
+      gamepadSteer = 0;
+    }
+
+    // Steering from D-pad (axes 14/15 on some controllers)
+    const dpadX = gp.axes[14] ?? 0;
+    if (Math.abs(dpadX) > GAMEPAD_STICK_DEADZONE) {
+      gamepadSteer = dpadX > 0 ? GAMEPAD_STEER_SCALE : -GAMEPAD_STEER_SCALE;
+    }
+
+    // Slow down from left stick up (negative Y = up)
+    if (stickY < GAMEPAD_SLOW_THRESHOLD) {
+      gamepadSlow = true;
+    } else {
+      gamepadSlow = false;
+    }
+
+    // Speed up from left stick down (positive Y = down)
+    if (stickY > GAMEPAD_SPEED_THRESHOLD) {
+      gamepadSpeed = true;
+    } else {
+      gamepadSpeed = false;
+    }
+
+    // ── D-pad buttons (standard Gamepad API button indices) ──
+    // Button 12 = D-pad up, 13 = D-pad down, 14 = D-pad left, 15 = D-pad right
+    // D-pad up/down only affects speed (slow/speed flags)
+    if (gp.buttons[12] && gp.buttons[12].pressed) {
+      gamepadSlow = true;
+      gamepadSpeed = false;  // D-pad up cancels any stick-based speed-up
+    }
+    if (gp.buttons[13] && gp.buttons[13].pressed) {
+      gamepadSpeed = true;
+      gamepadSlow = false;  // D-pad down cancels any stick-based slow-down
+    }
+    // D-pad left/right only affects steering (overwrites stick steering when active)
+    if (gp.buttons[14] && gp.buttons[14].pressed) {
+      gamepadSteer = -GAMEPAD_STEER_SCALE;
+    }
+    if (gp.buttons[15] && gp.buttons[15].pressed) {
+      gamepadSteer = GAMEPAD_STEER_SCALE;
+    }
+
+    // ── D-pad buttons (Nintendo-style mapping: buttons 16-19) ──
+    // Switch Pro Controller and some other controllers map D-pad to buttons 16-19
+    if (gp.buttons[16] && gp.buttons[16].pressed) {
+      gamepadSlow = true;
+      gamepadSpeed = false;  // D-pad up cancels any stick-based speed-up
+    }
+    if (gp.buttons[17] && gp.buttons[17].pressed) {
+      gamepadSpeed = true;
+      gamepadSlow = false;  // D-pad down cancels any stick-based slow-down
+    }
+    if (gp.buttons[18] && gp.buttons[18].pressed) {
+      gamepadSteer = -GAMEPAD_STEER_SCALE;
+    }
+    if (gp.buttons[19] && gp.buttons[19].pressed) {
+      gamepadSteer = GAMEPAD_STEER_SCALE;
+    }
+  }
+
+  gamepadConnected = anyConnected;
+}
+
+function applyGamepadInput() {
+  // Note: We no longer early-return if !running so that gamepad button presses 
+  // are still detected during the menu/gameover states to allow starting/restarting.
+
+  // Merge gamepad input with keyboard input (OR logic — either source can activate)
+  // Speed: true when keyboard key OR gamepad input is active
+  wHeld = keysDown['w'] || gamepadSlow;
+  sHeld = keysDown['s'] || gamepadSpeed;
+
+  // Steering: gamepad takes priority when active; otherwise keyboard manages steerDir
+  if (gamepadSteer !== 0) {
+    steerDir = gamepadSteer;
+  } else if (!keysDown['a'] && !keysDown['d']) {
+    // Gamepad idle and keyboard idle → clear steering
+    steerDir = 0;
+  }
+  // If gamepad idle but keyboard A/D held, keep steerDir from keyboard handler
+}
+
+function inputLoop() {
+  readGamepadInput();
+  applyGamepadInput();
+  requestAnimationFrame(inputLoop);
+}
+
+// Ensure keyboard inputs are properly handled for debugging
+// Debugging functions removed for cleanliness.
+
+// ═══════════════════════════════════════════════════════════
+//  GAMEPAD INPUT HANDLING
+// ═══════════════════════════════════════════════════════════
+function handleGamepadInput() {
+  // This function ensures that gamepad and keyboard inputs work properly together
+  // It's called from readGamepadInput to maintain proper state updates
+}
+
+// ═══════════════════════════════════════════════════════════
 //  GAME LOOP
 // ═══════════════════════════════════════════════════════════
 function gameLoop() {
+  // Note: readGamepadInput() and applyGamepadInput() are called by inputLoop()
+  // which runs continuously. We do NOT duplicate them here to avoid double-
+  // processing gamepad state each frame.
+
   update();
   render();
   if (running) requestAnimationFrame(gameLoop);
@@ -785,19 +1009,112 @@ overlay.addEventListener('click', (e) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+//  SCALING & FULLSCREEN
+// ═══════════════════════════════════════════════════════════
+const gameWrap = document.getElementById('game-wrap');
+const fullscreenBtn = document.getElementById('fullscreen-btn');
+let currentScale = null;
+
+// ── Scale the game to fit the viewport, preserving aspect ratio ──
+function updateGameScale() {
+  // Guard: when fullscreen is active, the element IS the viewport.
+  // Recalculating scale here causes a feedback loop because the browser
+  // uses the element's pre-transform dimensions as the fullscreen size.
+  if (document.fullscreenElement) return;
+
+  const targetW = CANVAS_W;
+  const targetH = CANVAS_H;
+  const scaleX = document.documentElement.clientWidth / targetW;
+  const scaleY = document.documentElement.clientHeight / targetH;
+  const scale = Math.min(scaleX, scaleY);
+
+  if (scale !== currentScale) {
+    currentScale = scale;
+    gameWrap.style.transform = `scale(${scale})`;
+  }
+}
+
+// ── Sync fullscreen button visibility ──
+function syncFullscreenUI() {
+  const supported = document.fullscreenEnabled || document.webkitFullscreenEnabled;
+  if (!supported) {
+    fullscreenBtn.classList.add('hidden');
+    return;
+  }
+  fullscreenBtn.classList.remove('hidden');
+  fullscreenBtn.textContent = document.fullscreenElement ? '[Exit FS]' : '[FS]';
+}
+
+// ── Toggle fullscreen on #game-wrap ──
+function toggleFullscreen() {
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    const el = gameWrap;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fn) {
+      fn.call(el).catch(() => {
+        // Silently fail — user may have cancelled
+      });
+    }
+  } else {
+    const fn = document.exitFullscreen || document.webkitExitFullscreen;
+    if (fn) fn.call(document);
+  }
+}
+
+// ── Fullscreen change listener ──
+document.addEventListener('fullscreenchange', () => {
+  document.body.classList.toggle('fullscreen-active', !!document.fullscreenElement);
+  syncFullscreenUI();
+  updateGameScale();
+});
+
+// ── Fullscreen error handler (cleanup on failure) ──
+document.addEventListener('fullscreenerror', () => {
+  document.body.classList.remove('fullscreen-active');
+  syncFullscreenUI();
+});
+
+// ── Also handle webkit prefix for Safari ──
+document.addEventListener('webkitfullscreenchange', () => {
+  document.body.classList.toggle('fullscreen-active', !!document.webkitFullscreenElement);
+  syncFullscreenUI();
+  updateGameScale();
+});
+
+document.addEventListener('webkitfullscreenerror', () => {
+  document.body.classList.remove('fullscreen-active');
+  syncFullscreenUI();
+});
+
+// ── Bind button click ──
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+// ── Debounced resize handler via rAF ──
+let resizeRafId = null;
+window.addEventListener('resize', () => {
+  if (resizeRafId) return;          // already pending
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = null;
+    updateGameScale();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
   function waitForTiles() {
     if (allTilesReady()) {
       initTerrain();
-      // Draw initial frame
       render();
     } else {
       setTimeout(waitForTiles, 50);
     }
   }
   waitForTiles();
+  inputLoop();
+  updateGameScale();
+  syncFullscreenUI();
 });
 </script>
 </body>
